@@ -1,0 +1,177 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import openpyxl
+import pyodbc
+from tkinter import ttk
+
+class ExcelFileValidationApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Excel File Validation")
+
+        # Initialize variables
+        self.excel_file = None
+        self.connection = None
+
+        # GUI Components
+        self.create_widgets()
+
+    def create_widgets(self):
+        # Button to open Excel file
+        self.open_button = tk.Button(self.root, text="Open Excel File", command=self.open_excel_file)
+        self.open_button.pack(pady=10)
+
+        # Button to close Excel application
+        self.close_button = tk.Button(self.root, text="Close Excel", command=self.close_excel_application)
+        self.close_button.pack(pady=10)
+
+        # Treeview (ListView) to display Excel data
+        self.tree = ttk.Treeview(self.root, columns=("Item Code", "PG", "NAQ", "Requesting", "Excess Qty", "Status"), show="headings")
+        self.tree.heading("Item Code", text="Item Code")
+        self.tree.heading("PG", text="PG")
+        self.tree.heading("NAQ", text="NAQ")
+        self.tree.heading("Requesting", text="Requesting")
+        self.tree.heading("Excess Qty", text="Excess Qty")
+        self.tree.heading("Status", text="Status")
+        self.tree.pack(pady=10)
+
+    def open_excel_file(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx;*.xlsm")])
+        print(f"Selected file: {file_path}")  # Debug
+        if file_path:
+            self.excel_file = file_path
+            self.read_spreadsheet(file_path)
+
+    def read_spreadsheet(self, file_path):
+        try:
+            # Open the Excel file and load the data
+            wb = openpyxl.load_workbook(file_path)
+            sheet = wb["Sheet1"]  # Assuming data is in "Sheet1"
+        
+            # Find the last row with data by checking column 1 (Item Code) for non-empty cells
+            last_row = 6  # Starting from row 6
+            for row in range(6, sheet.max_row + 1):
+                item_code = sheet.cell(row=row, column=1).value
+            if item_code is not None and item_code.strip():  # Check if Item Code is not None or empty
+                last_row = row  # Update last_row if a valid Item Code is found
+
+            # Now, process all rows from 6 to the dynamically determined last_row
+            for i in range(6, last_row + 1):
+                # Extract data from the relevant columns
+                item_code = sheet.cell(row=i, column=2).value  # Column 1 contains Item Code
+                col2 = sheet.cell(row=i, column=1).value       # Column 2
+                col3 = sheet.cell(row=i, column=3).value       # Column 3
+                col4 = sheet.cell(row=i, column=4).value       # Column 4
+                col5 = sheet.cell(row=i, column=5).value       # Column 5
+                warehouse = sheet.cell(row=i, column=7).value  # Column 7 (Warehouse)
+
+                # If the Item Code is None or empty, skip this row
+                if item_code is None or not item_code.strip():
+                    print(f"Skipping row {i} due to invalid Item Code")
+                    continue  # Skip the current row if Item Code is invalid
+
+                print(f"Reading row {i}: Item Code={item_code}, Warehouse={warehouse}")
+
+                # Filter rows where Warehouse (Column 7) equals "BRSTL1 - Manchester"
+                if warehouse == "BRSTL1 - Manchester":
+                    # Check availability in the database
+                    status = self.return_result(item_code)
+
+                    # Insert the data into the treeview
+                    self.tree.insert("", "end", values=(item_code, col2, col3, col4, col5, status), tags=(status,))
+
+                    # Set tag colors for statuses
+                    if status == "OK":
+                        self.tree.tag_configure("OK", foreground="green")
+                    elif status == "CHECK":
+                        self.tree.tag_configure("CHECK", foreground="orange")
+                    elif status == "NO":
+                        self.tree.tag_configure("NO", foreground="red")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred while reading the Excel file: {e}")
+
+
+    def return_result(self, item_code):
+        try:
+            print(f"Checking Item Code: {item_code}")  # Debug
+
+            # First, check if the item exists in a specific warehouse
+            query = f"""
+            SELECT ("OnHand" - "IsCommited") AS Avail, "IsCommited" AS "on_order", "MinStock" AS "MinStock"
+            FROM BRSTL_PB1.OITW
+            WHERE "ItemCode" = '{item_code}' AND "WhsCode" = '01'
+            """
+            print(f"Executing Query: {query}")  # Debug
+            result = self.run_query(query)
+            print(f"Query result: {result}")  # Debug
+
+            # If no result found, return "NO"
+            if not result:
+                return "NO"
+
+            # Extract values
+            avail, on_order, MinStock = result[0]
+
+            # Handle NULL or empty values for on_order
+            if on_order in [None, "", "NULL"]:  
+                on_order = 0
+
+            # Handle NULL or empty values for on_order
+            if MinStock in [None, "", "NULL"]:  
+                MinStock = 0    
+
+            print(f"Final Values -> Availability: {avail}, On Order: {on_order}")  # Debug
+
+            # Decision logic
+            if avail > 0 and on_order == 0 and MinStock == 0:
+                return "OK"
+            elif avail > 0 and on_order > 0 or MinStock > 0:
+                return "CHECK"
+            else:
+                return "NO"
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Error while checking availability for Item Code '{item_code}': {e}")
+            return "NO"
+
+
+    def run_query(self, query):
+        try:
+            if not self.connection:
+                self.connection = self.connect_to_database()
+            print("Connected to database.")  # Debug
+            
+            cursor = self.connection.cursor()
+            cursor.execute(query)
+            result = cursor.fetchall()
+            print(f"Query executed successfully. Result: {result}")  # Debug
+            return result
+        except Exception as e:
+            messagebox.showerror("Error", f"Database query failed: {e}")
+            return None
+
+    def connect_to_database(self):
+        connection_string = (
+            "DRIVER={HDBODBC};"
+            "SERVERNODE= 172.20.7.10:30015;"
+            "UID= V33REPORTS;"
+            "PWD= Vision33;"
+        )
+        conn = pyodbc.connect(connection_string)
+        return conn
+
+    def close_excel_application(self):
+        self.tree.delete(*self.tree.get_children())
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ExcelFileValidationApp(root)
+    root.mainloop()
+
+----------- to createan executible file need to install pyinstaller 
+
+----------- then run this to create the application pyinstaller --onefile --windowed excel_validation.py
